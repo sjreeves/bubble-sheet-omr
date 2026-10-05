@@ -1,0 +1,12 @@
+[
+ {
+  "id": "demo-form-a",
+  "template": "demo-form-a.json",
+  "reference": "demo-form-a-ref.png"
+ },
+ {
+  "id": "demo-form-b",
+  "template": "demo-form-b.json",
+  "reference": "demo-form-b-ref.png"
+ }
+]

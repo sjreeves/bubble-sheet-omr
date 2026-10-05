@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bubble sheet recognizer</title>
+<style>
+	:root {
+		--bg: #ffffff; --fg: #1b1b1f; --muted: #6a6a74; --line: #e2e2e8; --panel: #f7f7f9;
+		--ok: #1f7a4d; --check: #9a6b00; --multi: #b4342b; --blank: #9b9ba6;
+	}
+	@media (prefers-color-scheme: dark) {
+		:root {
+			--bg: #16161a; --fg: #ececf0; --muted: #9a9aa6; --line: #2e2e36; --panel: #1e1e24;
+			--ok: #52c08a; --check: #e0ab3a; --multi: #f1766a; --blank: #70707c;
+		}
+	}
+	* { box-sizing: border-box; }
+	body { margin: 0; padding: 24px 16px 64px; background: var(--bg); color: var(--fg);
+		font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+	main { max-width: 1040px; margin: 0 auto; }
+	h1 { font-size: 22px; margin: 0 0 4px; }
+	p.lede { color: var(--muted); margin: 0 0 24px; max-width: 64ch; }
+	.drop { display: block; border: 2px dashed var(--line); border-radius: 12px; padding: 28px; text-align: center;
+		background: var(--panel); cursor: pointer; }
+	.drop.over { border-color: var(--ok); }
+	.drop input { display: none; }
+	.status { margin: 16px 0; color: var(--muted); min-height: 1.5em; }
+	.err { color: var(--multi); }
+	.facts { display: flex; flex-wrap: wrap; gap: 8px 24px; margin: 16px 0; padding: 12px 16px;
+		background: var(--panel); border-radius: 10px; font-size: 13px; }
+	.facts b { font-weight: 600; }
+	.layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; }
+	@media (max-width: 760px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+	canvas { width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px;
+		background: #fff; }
+	table { border-collapse: collapse; width: 100%; font-size: 13px; }
+	th, td { text-align: left; padding: 2px 6px; border-bottom: 1px solid var(--line); }
+	th { color: var(--muted); font-weight: 600; }
+	td.pick { font-weight: 700; }
+	.s-ok td.state { color: var(--ok); }
+	.s-uncertain td.state { color: var(--check); }
+	.s-multiple td.state { color: var(--multi); }
+	.s-blank td.state, .s-unreadable td.state { color: var(--blank); }
+	.legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; margin: 8px 0 16px; }
+	.legend span::before { content: "\25cf"; margin-right: 5px; }
+	.legend .l-ok::before { color: var(--ok); }
+	.legend .l-check::before { color: var(--check); }
+	.legend .l-multi::before { color: var(--multi); }
+	.legend .l-blank::before { color: var(--blank); }
+	label.filter { font-size: 13px; color: var(--muted); }
+	h2 { font-size: 15px; margin: 20px 0 4px; }
+</style>
+</head>
+<body>
+<main>
+	<h1>Bubble sheet recognizer</h1>
+	<p class="lede">Photograph a filled demo sheet, or drop one of the synthetic photos from
+		<code>eval/photos</code>, and watch what the recognizer makes of it. Everything runs in this
+		tab: the photo is never uploaded anywhere.</p>
+
+	<label class="drop" id="drop">
+		<input type="file" id="file" accept="image/*">
+		<strong>Choose a photo</strong><br>
+		<span style="color: var(--muted)">or drag one here</span>
+	</label>
+
+	<div class="status" id="status"></div>
+	<div class="facts" id="facts" hidden></div>
+
+	<div class="layout" id="layout" hidden>
+		<div>
+			<div class="legend">
+				<span class="l-ok">read</span><span class="l-check">check</span>
+				<span class="l-multi">two marks</span><span class="l-blank">blank</span>
+			</div>
+			<canvas id="canvas"></canvas>
+		</div>
+		<div>
+			<label class="filter"><input type="checkbox" id="only"> show only questions needing a check</label>
+			<div id="tables"></div>
+		</div>
+	</div>
+</main>
+
+<script src="../src/scanEngine.js"></script>
+<script>
+(function () {
+	"use strict";
+
+	// What the host application asks for. Deliberately more questions than either
+	// demo form prints: the engine clamps each section to what the sheet has.
+	var WANTED = {
+		part1: { count: 60, options: 5 }, part2: { count: 60, options: 5 },
+		part3: { count: 40, options: 4 }, part4: { count: 40, options: 4 }
+	};
+	var COLORS = { ok: "#1f7a4d", uncertain: "#c08a00", multiple: "#c0392b", blank: "#9b9ba6", unreadable: "#9b9ba6" };
+
+	var $ = function (id) { return document.getElementById(id); };
+	var drop = $("drop"), status = $("status"), facts = $("facts"), layout = $("layout");
+
+	["dragenter", "dragover"].forEach(function (e) {
+		drop.addEventListener(e, function (ev) { ev.preventDefault(); drop.classList.add("over"); });
+	});
+	["dragleave", "drop"].forEach(function (e) {
+		drop.addEventListener(e, function (ev) { ev.preventDefault(); drop.classList.remove("over"); });
+	});
+	drop.addEventListener("drop", function (ev) {
+		if (ev.dataTransfer.files[0]) { run(ev.dataTransfer.files[0]); }
+	});
+	$("file").addEventListener("change", function () { if (this.files[0]) { run(this.files[0]); } });
+	$("only").addEventListener("change", render);
+
+	var lastResult = null;
+
+	function run(file) {
+		layout.hidden = true;
+		facts.hidden = true;
+		status.className = "status";
+		status.textContent = "Starting...";
+		ScanEngine.onStatus = function (msg) { status.textContent = msg; };
+		var t0 = performance.now();
+		// ?opencv=<url> loads OpenCV from somewhere else - a local copy when working
+		// offline. Left out, the engine fetches it from its usual CDN.
+		var local = new URLSearchParams(location.search).get("opencv");
+		ScanEngine.scan({
+			file: file, sections: WANTED,
+			urls: { sheets: "../sheets/sheets.json", opencv: local || undefined }
+		})
+			.then(function (result) {
+				lastResult = result;
+				lastResult.ms = performance.now() - t0;
+				status.textContent = "";
+				render();
+			})
+			.catch(function (err) {
+				status.className = "status err";
+				status.textContent = err && err.message ? err.message : String(err);
+			});
+	}
+
+	function render() {
+		if (!lastResult) { return; }
+		var r = lastResult;
+		var flagged = 0, answered = 0, total = 0;
+		r.sections.forEach(function (s) {
+			s.questions.forEach(function (q) {
+				total++;
+				if (q.pick) { answered++; }
+				if (q.status === "uncertain" || q.status === "multiple" || q.status === "unreadable") { flagged++; }
+			});
+		});
+		facts.hidden = false;
+		facts.innerHTML = [
+			["sheet", r.sheet.name],
+			["printing", r.printType === "red" ? "drop-out red" : "black and white"],
+			["alignment", r.registration.method + ", " + r.registration.inliers + " inliers, fit " + r.registration.fit],
+			["answered", answered + " of " + total],
+			["needs a check", String(flagged)],
+			["time", (r.ms / 1000).toFixed(1) + "s"]
+		].map(function (f) { return "<div><b>" + f[0] + "</b> " + escapeHtml(f[1]) + "</div>"; }).join("");
+
+		drawOverlay(r);
+		drawTables(r);
+		layout.hidden = false;
+	}
+
+	/* The warped sheet with every sampled oval ringed in its decision colour.
+	   This is the picture that makes a misread obvious: if the rings sit off the
+	   printing, the problem is alignment, not thresholding. */
+	function drawOverlay(r) {
+		var canvas = $("canvas");
+		canvas.width = r.warpedCanvas.width;
+		canvas.height = r.warpedCanvas.height;
+		var ctx = canvas.getContext("2d");
+		ctx.drawImage(r.warpedCanvas, 0, 0);
+		ctx.lineWidth = 2.5;
+		r.sections.forEach(function (s) {
+			s.questions.forEach(function (q) {
+				q.choices.forEach(function (c) {
+					var picked = q.pick === c.l;
+					ctx.strokeStyle = COLORS[q.status] || COLORS.blank;
+					ctx.globalAlpha = picked ? 1 : 0.35;
+					ctx.beginPath();
+					ctx.ellipse(c.x, c.y, r.ovalPx.w / 2 + 1.5, r.ovalPx.h / 2 + 1.5, 0, 0, 6.2832);
+					ctx.stroke();
+				});
+			});
+		});
+		ctx.globalAlpha = 1;
+	}
+
+	function drawTables(r) {
+		var onlyFlagged = $("only").checked;
+		var html = "";
+		r.sections.forEach(function (s) {
+			var rows = s.questions.filter(function (q) {
+				return !onlyFlagged || q.status === "uncertain" || q.status === "multiple" || q.status === "unreadable";
+			});
+			html += "<h2>" + escapeHtml(s.name) + " <span style='color:var(--muted);font-weight:400'>(" +
+				s.count + " of " + s.sheetCount + " printed)</span></h2>";
+			if (!rows.length) { html += "<p style='color:var(--muted);font-size:13px'>nothing to check</p>"; return; }
+			html += "<table><thead><tr><th>#</th><th>answer</th><th>state</th><th>darkness</th></tr></thead><tbody>";
+			rows.forEach(function (q) {
+				html += "<tr class='s-" + q.status + "'><td>" + q.n + "</td><td class='pick'>" +
+					(q.pick || "&ndash;") + "</td><td class='state'>" +
+					(q.status === "ok" ? "read" : q.status === "uncertain" ? "check" :
+						q.status === "multiple" ? "two marks" : q.status) + "</td><td>" +
+					q.values.map(function (v) { return v.toFixed(2); }).join(" ") + "</td></tr>";
+			});
+			html += "</tbody></table>";
+		});
+		$("tables").innerHTML = html;
+	}
+
+	function escapeHtml(s) {
+		return String(s).replace(/[&<>"]/g, function (c) {
+			return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+		});
+	}
+})();
+</script>
+</body>
+</html>
